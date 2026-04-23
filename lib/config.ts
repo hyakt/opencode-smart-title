@@ -9,6 +9,7 @@ export interface PluginConfig {
     enabled: boolean
     debug: boolean
     model?: string
+    prompt?: string
     updateThreshold: number
 }
 
@@ -137,6 +138,7 @@ export function getConfig(ctx?: PluginInput): PluginConfig {
                 enabled: globalConfig.enabled ?? config.enabled,
                 debug: globalConfig.debug ?? config.debug,
                 model: globalConfig.model ?? config.model,
+                prompt: globalConfig.prompt ?? config.prompt,
                 updateThreshold: globalConfig.updateThreshold ?? config.updateThreshold
             }
         }
@@ -151,6 +153,7 @@ export function getConfig(ctx?: PluginInput): PluginConfig {
                 enabled: projectConfig.enabled ?? config.enabled,
                 debug: projectConfig.debug ?? config.debug,
                 model: projectConfig.model ?? config.model,
+                prompt: projectConfig.prompt ?? config.prompt,
                 updateThreshold: projectConfig.updateThreshold ?? config.updateThreshold
             }
         }

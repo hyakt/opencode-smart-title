@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "@tarquinen/opencode-smart-title",
+  "name": "@hyakt/opencode-smart-title",
   "version": "0.1.7",
   "type": "module",
   "description": "OpenCode plugin that automatically generates meaningful session titles using AI and smart context selection",
@@ -25,21 +25,18 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Tarquinen/opencode-smart-title.git"
+    "url": "git+https://github.com/hyakt/opencode-smart-title.git"
   },
   "bugs": {
-    "url": "https://github.com/Tarquinen/opencode-smart-title/issues"
+    "url": "https://github.com/hyakt/opencode-smart-title/issues"
   },
-  "homepage": "https://github.com/Tarquinen/opencode-smart-title#readme",
+  "homepage": "https://github.com/hyakt/opencode-smart-title#readme",
   "author": "Dan Mindru",
   "license": "MIT",
   "peerDependencies": {
     "@opencode-ai/plugin": ">=0.13.7"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "^1.0.27",
-    "@tarquinen/opencode-auth-provider": "^0.1.7",
-    "ai": "^5.0.98",
     "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {

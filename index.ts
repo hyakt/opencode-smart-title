@@ -14,7 +14,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { getConfig } from "./lib/config.js"
 import { Logger } from "./lib/logger.js"
-import { selectModel } from "./lib/model-selector.js"
 import { TITLE_PROMPT } from "./prompt.js"
 import { join } from "path"
 import { homedir } from "os"
@@ -25,6 +24,9 @@ interface OpenCodeClient {
         messages: (params: { path: { id: string } }) => Promise<any>
         update: (params: { path: { id: string }, body: { title: string } }) => Promise<any>
         get: (params: { path: { id: string } }) => Promise<any>
+        create: (params: { body: { parentID: string; title: string }; query?: { directory?: string } }) => Promise<any>
+        prompt: (params: { path: { id: string }; query?: { directory?: string }; body: { agent?: string; model?: { providerID: string; modelID: string }; parts: Array<{ type: "text"; text: string }> } }) => Promise<any>
+        delete: (params: { path: { id: string } }) => Promise<any>
     }
     tui: {
         showToast: (params: { body: { title: string, message: string, variant: "info" | "success" | "warning" | "error", duration: number } }) => Promise<any>
@@ -262,75 +264,107 @@ function cleanTitle(raw: string): string {
 }
 
 /**
- * Generate title from conversation context using AI
+ * Parse model string "provider/model" into providerID and modelID
+ */
+function parseModel(configModel: string | undefined): { providerID: string; modelID: string } | null {
+    if (!configModel) return null
+    const parts = configModel.split('/')
+    if (parts.length !== 2) return null
+    return { providerID: parts[0], modelID: parts[1] }
+}
+
+/**
+ * Extract assistant response text from session messages
+ */
+async function extractAssistantResponse(
+    client: OpenCodeClient,
+    sessionId: string,
+    logger: Logger
+): Promise<string | null> {
+    const { data: messages } = await client.session.messages({ path: { id: sessionId } })
+    const assistantMessages = messages?.filter(
+        (msg: Message) => msg.info.role === "assistant"
+    )
+    if (!assistantMessages || assistantMessages.length === 0) return null
+
+    const lastMessage = assistantMessages[assistantMessages.length - 1]
+    return extractTextOnly(lastMessage.parts) || null
+}
+
+/**
+ * Generate title from conversation context using AI via opencode subagent session
  */
 async function generateTitleFromContext(
     context: string,
     configModel: string | undefined,
     logger: Logger,
-    client: OpenCodeClient
+    client: OpenCodeClient,
+    parentSessionId: string,
+    directory?: string,
+    customPrompt?: string
 ): Promise<string | null> {
+    const modelInfo = parseModel(configModel)
+    let childSessionId: string | null = null
+
     try {
-        logger.debug('title-generation', 'Selecting model', { configModel })
-
-        const { model, modelInfo, source, reason, failedModel } = await selectModel(
-            logger,
-            configModel
-        )
-
-        logger.info('title-generation', 'Model selected', {
-            providerID: modelInfo.providerID,
-            modelID: modelInfo.modelID,
-            source,
-            reason
+        logger.info('title-generation', 'Creating subagent session for title generation', {
+            configModel,
+            parentSessionId
         })
 
-        // Show toast if we had to fallback from a configured model
-        if (failedModel) {
-            try {
-                await client.tui.showToast({
-                    body: {
-                        title: "Smart Title: Model fallback",
-                        message: `${failedModel.providerID}/${failedModel.modelID} failed\nUsing ${modelInfo.providerID}/${modelInfo.modelID}`,
-                        variant: "info",
-                        duration: 5000
-                    }
-                })
-                logger.info('title-generation', 'Toast notification shown for model fallback', {
-                    failedModel,
-                    selectedModel: modelInfo
-                })
-            } catch (toastError: any) {
-                logger.error('title-generation', 'Failed to show toast notification', {
-                    error: toastError.message
-                })
-                // Don't fail the whole operation if toast fails
-            }
+        // Create child session
+        const createResponse = await client.session.create({
+            body: { parentID: parentSessionId, title: "smart-title" },
+            query: directory ? { directory } : undefined
+        })
+
+        const createdSession = createResponse?.data ?? createResponse
+        childSessionId = typeof createdSession?.id === "string" ? createdSession.id : null
+
+        if (!childSessionId) {
+            logger.error('title-generation', 'Failed to create child session')
+            return null
         }
 
-        logger.debug('title-generation', 'Generating title', {
-            contextLength: context.length
+        logger.debug('title-generation', 'Child session created', {
+            childSessionId,
+            model: configModel
         })
 
-        // Lazy import - only load the 2.8MB ai package when actually needed
-        const { generateText } = await import('ai')
+        const prompt = customPrompt || TITLE_PROMPT
 
-        const result = await generateText({
-            model,
-            messages: [
-                {
-                    role: 'user',
-                    content: `${TITLE_PROMPT}\n\n<conversation>\n${context}\n</conversation>\n\nOutput the title now:`
-                }
-            ]
+        logger.debug('title-generation', 'Generating title via subagent', {
+            contextLength: context.length,
+            promptSource: customPrompt ? 'custom' : 'built-in'
         })
 
-        const title = cleanTitle(result.text)
+        // Send prompt to child session
+        await client.session.prompt({
+            path: { id: childSessionId },
+            query: directory ? { directory } : undefined,
+            body: {
+                ...(modelInfo ? { model: modelInfo } : {}),
+                parts: [{
+                    type: "text",
+                    text: `${prompt}\n\n<conversation>\n${context}\n</conversation>\n\nOutput the title now:`
+                }]
+            }
+        })
+
+        // Extract response
+        const responseText = await extractAssistantResponse(client, childSessionId, logger)
+
+        if (!responseText) {
+            logger.warn('title-generation', 'No response from subagent')
+            return null
+        }
+
+        const title = cleanTitle(responseText)
 
         logger.info('title-generation', 'Title generated successfully', {
             title,
             titleLength: title.length,
-            rawLength: result.text.length
+            rawLength: responseText.length
         })
 
         return title
@@ -341,6 +375,19 @@ async function generateTitleFromContext(
             stack: error.stack
         })
         return null
+    } finally {
+        // Cleanup child session
+        if (childSessionId) {
+            try {
+                await client.session.delete({ path: { id: childSessionId } })
+                logger.debug('title-generation', 'Child session cleaned up', { childSessionId })
+            } catch (cleanupError: any) {
+                logger.debug('title-generation', 'Failed to clean up child session', {
+                    childSessionId,
+                    error: cleanupError.message
+                })
+            }
+        }
     }
 }
 
@@ -351,7 +398,8 @@ async function updateSessionTitle(
     client: OpenCodeClient,
     sessionId: string,
     logger: Logger,
-    config: ReturnType<typeof getConfig>
+    config: ReturnType<typeof getConfig>,
+    directory?: string
 ): Promise<void> {
     try {
         logger.info('update-title', 'Title update triggered', { sessionId })
@@ -381,12 +429,15 @@ async function updateSessionTitle(
         // Format context
         const context = formatContextForTitle(turns)
 
-        // Generate title
+        // Generate title via subagent
         const newTitle = await generateTitleFromContext(
             context,
             config.model,
             logger,
-            client
+            client,
+            sessionId,
+            directory,
+            config.prompt
         )
 
         if (!newTitle) {
@@ -485,7 +536,7 @@ const SmartTitlePlugin: Plugin = async (ctx) => {
                 })
 
                 // Fire and forget - don't block the event handler
-                updateSessionTitle(client, sessionId, logger, config).catch((error) => {
+                updateSessionTitle(client, sessionId, logger, config, ctx.directory).catch((error) => {
                     logger.error('event', 'Title update failed', {
                         sessionId,
                         error: error.message,
